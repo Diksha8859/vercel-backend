@@ -22,23 +22,41 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── MongoDB store ───────────────────────────────────────────────────────────────
-MONGO_URI = os.getenv("MONGO_URI")
-if not MONGO_URI:
-    raise RuntimeError("MONGO_URI is not set. Define it in .env or environment.")
-client = MongoClient(MONGO_URI)
-db = client["hrms_lite"]
-employees_coll = db["employees"]
-attendance_coll = db["attendance"]
+# ── MongoDB store (lazy init to avoid import-time crashes) ─────────────────────
+client = None
+db = None
+employees_coll = None
+attendance_coll = None
 
-# Ensure useful indexes
-employees_coll.create_index("employee_id", unique=True)
-employees_coll.create_index("email", unique=True)
-attendance_coll.create_index(
-    [("employee_id", 1), ("date", 1)],
-    unique=True,
-    name="employee_date_unique",
-)
+
+def init_db() -> None:
+    """Initialize MongoDB connection and indexes on first use."""
+    global client, db, employees_coll, attendance_coll
+
+    if db is not None:
+        return
+
+    mongo_uri = os.getenv("MONGO_URI","mongodb+srv://diksha2021128:diksha@ecommerce.dxsk6xe.mongodb.net/?appName=ecommerce")
+    if not mongo_uri:
+        # This will surface as a 500 from FastAPI instead of crashing import
+        raise RuntimeError(
+            "MONGO_URI is not set in the server environment. "
+            "Configure it in your Vercel project settings."
+        )
+
+    client = MongoClient(mongo_uri)
+    db = client["hrms_lite"]
+    employees_coll = db["employees"]
+    attendance_coll = db["attendance"]
+
+    # Ensure useful indexes
+    employees_coll.create_index("employee_id", unique=True)
+    employees_coll.create_index("email", unique=True)
+    attendance_coll.create_index(
+        [("employee_id", 1), ("date", 1)],
+        unique=True,
+        name="employee_date_unique",
+    )
 
 # ── Models ─────────────────────────────────────────────────────────────────────
 DEPARTMENTS = ["Engineering", "Marketing", "Sales", "HR", "Finance", "Operations", "Design", "Product"]
@@ -108,6 +126,7 @@ def root():
 
 @app.get("/employees", response_model=List[dict])
 def get_employees():
+    init_db()
     # Fetch all employees from MongoDB (exclude _id)
     emps: List[Dict[str, Any]] = list(
         employees_coll.find({}, {"_id": 0})
@@ -122,6 +141,7 @@ def get_employees():
 
 @app.post("/employees", status_code=201)
 def create_employee(employee: EmployeeCreate):
+    init_db()
     record = employee.model_dump()
     record["created_at"] = datetime.utcnow().isoformat()
 
@@ -146,6 +166,7 @@ def create_employee(employee: EmployeeCreate):
 
 @app.get("/employees/{employee_id}")
 def get_employee(employee_id: str):
+    init_db()
     emp = employees_coll.find_one({"employee_id": employee_id}, {"_id": 0})
     if not emp:
         raise HTTPException(status_code=404, detail="Employee not found")
@@ -157,6 +178,7 @@ def get_employee(employee_id: str):
 
 @app.delete("/employees/{employee_id}")
 def delete_employee(employee_id: str):
+    init_db()
     result = employees_coll.delete_one({"employee_id": employee_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Employee not found")
@@ -170,6 +192,7 @@ def get_all_attendance(
     employee_id: Optional[str] = Query(None),
     date_filter: Optional[str] = Query(None, alias="date")
 ):
+    init_db()
     query: Dict[str, Any] = {}
     if employee_id:
         query["employee_id"] = employee_id
@@ -183,6 +206,7 @@ def get_all_attendance(
 
 @app.post("/attendance", status_code=201)
 def mark_attendance(attendance: AttendanceCreate):
+    init_db()
     # Ensure employee exists
     if not employees_coll.find_one({"employee_id": attendance.employee_id}):
         raise HTTPException(status_code=404, detail="Employee not found")
@@ -204,6 +228,7 @@ def mark_attendance(attendance: AttendanceCreate):
 
 @app.delete("/attendance/{employee_id}/{date}")
 def delete_attendance(employee_id: str, date: str):
+    init_db()
     result = attendance_coll.delete_one({"employee_id": employee_id, "date": date})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Attendance record not found")
@@ -212,6 +237,7 @@ def delete_attendance(employee_id: str, date: str):
 # ── Dashboard / Summary ────────────────────────────────────────────────────────
 @app.get("/dashboard/summary")
 def get_dashboard_summary():
+    init_db()
     total_employees = employees_coll.count_documents({})
     today = date.today().isoformat()
     present_today = attendance_coll.count_documents(
